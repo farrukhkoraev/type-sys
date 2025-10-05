@@ -6,59 +6,113 @@
 
 (defn empty-ctx [] {})
 
-(defn t-var [name]
-  {:tag :var
-   :name name})
+;type = a, b...
+;fn-type = [a a]
+;var = name | [name type] 
+;lambda = (fn [[x arg-type] fn-type] M) 
+;appl = (M N)
 
-(defn t-abstr
-  ([[p t] body tt]
-   {:tag :abstr
-    :param [p t]
-    :body body
-    :type tt})
-  ([[p t] body] (t-abstr [p t] body nil)))
+(defn lambda? [term]
+  (and (list? term) (= (first term) 'fn)))
 
-(defn t-appl [f arg]
-  {:tag :appl
-   :abstr f
-   :arg arg})
+(defn param [term]
+  (cond
+    (symbol? term) term
+    (= (first term) 'fn) (first (second term))
+    :else nil))
+
+(defn body [term]
+  (cond
+    (symbol? term) term
+    (lambda? term) (last term)
+    :else nil))
 
 (defn free-vars [term]
-  (case (:tag term)
-    :variable #{(:name term)}
-    :lambda (disj (free-vars (:body term)) (:param term))
-    :application (clojure.set/union
-                  (free-vars (:lambda term))
-                  (free-vars (:arg term)))))
+  (if (symbol? term) #{term}
+      (if (lambda? term)
+        (disj (free-vars (body term)) (param term))
+        (clojure.set/union
+         (free-vars (first term))
+         (free-vars (second term))))))
 
 (defn bound-vars [term]
-  (case (:tag term)
-    :variable #{}
-    :lambda (conj
-             (bound-vars (:body term))
-             (:param term))
-    :application (clojure.set/union
-                  (bound-vars (:lambda term))
-                  (bound-vars (:arg term)))))
-(defn substitute [term-old x term-new]
-  (case (:tag term-old)
-    :var (if (= (:name term-old) x) term-new term-old)
-    :abstr (let [p (:param term-old)
-                 t (:type term-old)
-                 b (:body term-old)]
-             (if (= p x) term-old
-                 (t-abstr p t (substitute b x term-new))))
-    :appl (t-appl
-           (substitute (:abstr term-old) x term-new)
-           (substitute (:arg term-old) x term-new))))
+  (if (symbol? term) #{}
+      (if (= (first term) 'fn)
+        (conj (bound-vars (body term))  (param term))
+        (clojure.set/union
+         (bound-vars (first term))
+         (bound-vars (second term))))))
+
+(free-vars '(fn [x] (fn [y] z)))
+
+; (fn [[x a] [a a]] x)
+(defn fresh-var [used name]
+  (loop [n 0]
+    (let [cand (symbol (str name n))]
+      (if (contains? used cand)
+        (recur (+ n 1))
+        cand))))
+
+(defn alpha-subst [term x y]
+  (if (symbol? term)
+    (if (= term x) y term)
+    (if (= (first term) 'fn)
+      (if (= (param term) x)
+        (list 'fn [y] (alpha-subst (last term) x y))
+        (list 'fn [(param term)] (alpha-subst (last term) x y)))
+      (list (alpha-subst (first term) x y)
+            (alpha-subst (second term) x y)))))
+
+(defn alpha-eqv
+  ([term]
+   (let [x (param term)]
+     (cond
+       (symbol? term) (alpha-subst term x (fresh-var #{x} x))
+       (lambda? term) (let [b (alpha-eqv (body term))
+                            t (list 'fn (second term) b)]
+                        (alpha-subst t x (fresh-var #{x} x)))
+       :else term))))
+
+;(alpha-eqv '(fn [x] (fn [y] (x z))))
+
+(defn substitute [term x M]
+  (cond
+    (symbol? term) (if (= term x) M term)
+    (lambda? term) (let [[_ p b] (alpha-eqv term)]
+                     (cond
+                       (= (param term) x) term
+                       (not (contains?
+                             (free-vars M)
+                             (param term))) (list
+                                             'fn
+                                             [(param term)]
+                                             (substitute (last term) x M))
+                       :else (list 'fn p (substitute b x M))))
+    :else (list (substitute (first term) x M)
+                (substitute (second term) x M))))
+
+(free-vars (second '(x y)))
+
+; (let [term '(fn [[x a] a] y)
+;       x 'y
+;       y 'z]
+;   (if (= (first term) 'fn)
+;     (let [p (first (second term))
+;           t (second (second term))
+;           b (last term)]
+;       (if (= (first p) x)) term
+;
+;       )
+;     nil))
 
 (defn beta-red [term]
-  (case (:tag term)
-    :var term
-    :abstr (t-abstr (:param term) (:type term) (beta-red (:body term)))
-    :appl (let [f (:abstr term)
-                x (:arg term)]
-            (substitute (:body f) (:param f) x))))
+  (cond
+    (symbol? term) term
+    (lambda? term) (list 'fn (second term) (beta-red (last term)))
+    :else (let [[func arg] term]
+            (if-not (lambda? func)
+              term
+              (substitute (body func) (param func) arg)))))
 
 (defn normalize [term]
   (loop [cur term]
@@ -66,15 +120,12 @@
       (if (= cur next) cur
           (recur next)))))
 
-(defn to-str [term]
-  (case (:tag term)
-    :var (str (:name term))
-    :abstr (let [[p t] (:param term)
-                 b (:body term)
-                 tt (:type term)]
-             (if (nil? tt)
-               (str "(" "λ" p ":" t "." (to-str b) ")")
-               (str "(" "λ" p ":" t "." (to-str b) ": " tt ")")))
-    :appl (str (to-str (:abstr term)) " " (to-str (:arg term)))))
+(defn check-type [term ctxt])
+(defn infere-type [term ctxt])
 
-(to-str (t-appl (t-abstr ['x 'α] (t-var 'x) 'α->α) (t-var 'y)))
+(def zero '(fn [f] (fn [x] x)))
+(def one '(fn [f] (fn [x] (f x))))
+
+(def add '(fn [n] (fn [m] (fn [f] (fn [x] ((n f) ((m f) x)))))))
+
+(beta-red (list add (alpha-eqv one)))

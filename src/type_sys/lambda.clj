@@ -1,5 +1,7 @@
 (ns type-sys.lambda
-  (:require [clojure.spec.alpha :as s]))
+  (:require
+   [clojure.spec.alpha :as s]
+   [clojure.set :as set]))
 
 ; α β γ δ ε ζ η θ ι κ λ μ ν ξ ο π ρ σ τ υ φ χ ψ ω
 ;Α Β Γ Δ Ε Ζ Η Θ Ι Κ Λ Μ Ν Ξ Ο Π Ρ Σ Τ Υ Φ Χ Ψ Ω
@@ -15,6 +17,9 @@
 (defn lambda? [term]
   (and (list? term) (= (first term) 'fn)))
 
+(defn appl? [term]
+  (and (list? term) (= (count term) 2)))
+
 (defn param [term]
   (cond
     (symbol? term) term
@@ -26,6 +31,13 @@
     (symbol? term) term
     (lambda? term) (last term)
     :else nil))
+
+(defn fresh-var [used name]
+  (loop [n 0]
+    (let [cand (symbol (str name n))]
+      (if (contains? used cand)
+        (recur (+ n 1))
+        cand))))
 
 (defn free-vars [term]
   (if (symbol? term) #{term}
@@ -43,89 +55,49 @@
          (bound-vars (first term))
          (bound-vars (second term))))))
 
-(free-vars '(fn [x] (fn [y] z)))
-
-; (fn [[x a] [a a]] x)
-(defn fresh-var [used name]
-  (loop [n 0]
-    (let [cand (symbol (str name n))]
-      (if (contains? used cand)
-        (recur (+ n 1))
-        cand))))
-
-(defn alpha-subst [term x y]
-  (if (symbol? term)
-    (if (= term x) y term)
-    (if (= (first term) 'fn)
-      (if (= (param term) x)
-        (list 'fn [y] (alpha-subst (last term) x y))
-        (list 'fn [(param term)] (alpha-subst (last term) x y)))
-      (list (alpha-subst (first term) x y)
-            (alpha-subst (second term) x y)))))
-
-(defn alpha-eqv
-  ([term]
-   (let [x (param term)]
-     (cond
-       (symbol? term) (alpha-subst term x (fresh-var #{x} x))
-       (lambda? term) (let [b (alpha-eqv (body term))
-                            t (list 'fn (second term) b)]
-                        (alpha-subst t x (fresh-var #{x} x)))
-       :else term))))
-
-;(alpha-eqv '(fn [x] (fn [y] (x z))))
+(defn rename [term x y]
+  (cond
+    (symbol? term) (if (= term x) y term)
+    (lambda? term) (if (= (param term) x)
+                     (list 'fn [y] (rename (body term) x y))
+                     (list 'fn [(param term)] (rename (body term) x y)))
+    :else (list (rename (first term) x y)
+                (rename (second term) x y))))
 
 (defn substitute [term x M]
   (cond
     (symbol? term) (if (= term x) M term)
-    (lambda? term) (let [[_ p b] (alpha-eqv term)]
-                     (cond
-                       (= (param term) x) term
-                       (not (contains?
-                             (free-vars M)
-                             (param term))) (list
-                                             'fn
-                                             [(param term)]
-                                             (substitute (last term) x M))
-                       :else (list 'fn p (substitute b x M))))
+    (lambda? term)
+    (let [[_ [p] b] term
+          M-fv (free-vars M)]
+      (cond
+        (= p x) term
+        (contains? M-fv p) (let [used (set/union M-fv (free-vars b) #{x})
+                                 new-p (fresh-var used p)
+                                 new-b (rename b p new-p)]
+                             (list 'fn [new-p] (substitute new-b x M)))
+        :else (list 'fn [p] (substitute b x M))))
     :else (list (substitute (first term) x M)
                 (substitute (second term) x M))))
 
-(free-vars (second '(x y)))
-
-; (let [term '(fn [[x a] a] y)
-;       x 'y
-;       y 'z]
-;   (if (= (first term) 'fn)
-;     (let [p (first (second term))
-;           t (second (second term))
-;           b (last term)]
-;       (if (= (first p) x)) term
-;
-;       )
-;     nil))
-
-(defn beta-red [term]
+(defn beta-step [term]
   (cond
-    (symbol? term) term
-    (lambda? term) (list 'fn (second term) (beta-red (last term)))
-    :else (let [[func arg] term]
-            (if-not (lambda? func)
-              term
-              (substitute (body func) (param func) arg)))))
+    (and (appl? term)
+         (lambda? (first term))) (let [[M N] term]
+                                   (substitute (body M) (param M) N))
+    (appl? term) (let [[M N] term
+                       M' (beta-step M)]
+                   (if M'
+                     (list M' N)
+                     (if-let [N' (beta-step N)] (list M N') nil)))
+    (lambda? term) (if-let [b' (beta-step (body term))]
+                     (list 'fn (second term) b')
+                     nil)
+    :else nil))
 
 (defn normalize [term]
   (loop [cur term]
-    (let [next (beta-red cur)]
-      (if (= cur next) cur
+    (let [next (beta-step cur)]
+      (if (or (nil? next) (= cur next)) cur
           (recur next)))))
 
-(defn check-type [term ctxt])
-(defn infere-type [term ctxt])
-
-(def zero '(fn [f] (fn [x] x)))
-(def one '(fn [f] (fn [x] (f x))))
-
-(def add '(fn [n] (fn [m] (fn [f] (fn [x] ((n f) ((m f) x)))))))
-
-(beta-red (list add (alpha-eqv one)))
